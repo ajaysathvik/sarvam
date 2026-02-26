@@ -1,15 +1,16 @@
 """
 RAG — Retrieval-Augmented Generation
 =====================================
-Loads the two PhD PDF files, splits them into chunks, and uses
-BM25 keyword search to retrieve the most relevant snippets for
-a given query.  The returned text is injected into the LLM system
-prompt via chat(context=...).
+Loads knowledge from the data/ directory:
+  - PDF files  → extracted via pypdf
+  - Markdown / HTML files → HTML tags stripped, table rows reconstructed
+
+Uses BM25 keyword search to retrieve the most relevant snippets.
 
 Requirements: pypdf rank-bm25
 """
 
-import os
+import re
 from pathlib import Path
 
 from pypdf import PdfReader
@@ -18,44 +19,101 @@ from rank_bm25 import BM25Okapi
 # ─── Config ───────────────────────────────────────────────────────────────────
 
 DATA_DIR   = Path(__file__).parent / "data"
-PDF_FILES  = [
-    DATA_DIR / "phd-policy.pdf",
-    DATA_DIR / "phd-research-areas-2025.pdf",
-]
-CHUNK_SIZE = 300   # words per chunk
+CHUNK_SIZE = 250   # words per chunk (smaller = more precise retrieval)
 TOP_K      = 3     # number of chunks to return
 
-# ─── Load & Chunk PDFs ────────────────────────────────────────────────────────
+# ─── HTML helpers ─────────────────────────────────────────────────────────────
 
-def _extract_text(pdf_path: Path) -> str:
-    reader = PdfReader(str(pdf_path))
-    pages = [page.extract_text() or "" for page in reader.pages]
-    return "\n".join(pages)
+_TAG_RE  = re.compile(r"<[^>]+>")
+_WS_RE   = re.compile(r"\s+")
 
 
-def _chunk_text(text: str, chunk_size: int = CHUNK_SIZE) -> list[str]:
-    words  = text.split()
+def _strip_html(text: str) -> str:
+    """Remove HTML tags and collapse whitespace."""
+    text = _TAG_RE.sub(" ", text)
+    text = text.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
+    return _WS_RE.sub(" ", text).strip()
+
+
+def _parse_table_rows(html: str) -> list[str]:
+    """
+    Extract <tr> blocks from HTML tables and return each row as a
+    single line of clean text.  This reassembles split table cells
+    so that 'Dr. V Lakshmi Chetana' and 'CSE' land in the same chunk.
+    """
+    rows = []
+    for tr_match in re.finditer(r"<tr[^>]*>(.*?)</tr>", html, re.DOTALL | re.IGNORECASE):
+        cells = re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", tr_match.group(1), re.DOTALL | re.IGNORECASE)
+        texts = [_strip_html(c) for c in cells if _strip_html(c)]
+        if texts:
+            rows.append(" | ".join(texts))
+    return rows
+
+
+# ─── Loaders ──────────────────────────────────────────────────────────────────
+
+def _load_pdf(path: Path) -> list[str]:
+    """Extract text pages from a PDF and return as a list of strings."""
+    reader = PdfReader(str(path))
+    return [page.extract_text() or "" for page in reader.pages]
+
+
+def _load_markdown(path: Path) -> list[str]:
+    """
+    Load a markdown file that may contain HTML tables.
+    Returns table rows as structured lines + plain-text paragraphs.
+    """
+    raw = path.read_text(encoding="utf-8", errors="ignore")
+
+    # First pass: extract structured table rows
+    rows = _parse_table_rows(raw)
+
+    # Second pass: strip all remaining HTML for any non-table content
+    plain = _strip_html(raw)
+
+    # Combine: table rows (very information-dense) + plain text
+    return rows + [plain]
+
+
+# ─── Chunker ──────────────────────────────────────────────────────────────────
+
+def _chunk(texts: list[str], chunk_size: int = CHUNK_SIZE) -> list[str]:
+    """Split a list of text blocks into word-count-limited chunks."""
     chunks = []
-    for i in range(0, len(words), chunk_size):
-        chunk = " ".join(words[i : i + chunk_size])
-        if chunk.strip():
-            chunks.append(chunk)
+    for text in texts:
+        words = text.split()
+        for i in range(0, len(words), chunk_size):
+            chunk = " ".join(words[i : i + chunk_size])
+            if chunk.strip():
+                chunks.append(chunk)
     return chunks
 
 
+# ─── Index builder ────────────────────────────────────────────────────────────
+
 def _build_index() -> tuple[BM25Okapi, list[str]]:
     all_chunks: list[str] = []
-    for pdf in PDF_FILES:
-        if not pdf.exists():
-            print(f"[RAG] Warning: {pdf} not found, skipping.")
+
+    for path in sorted(DATA_DIR.iterdir()):
+        if not path.is_file():
             continue
-        text   = _extract_text(pdf)
-        chunks = _chunk_text(text)
-        all_chunks.extend(chunks)
-        print(f"[RAG] Loaded {len(chunks)} chunks from {pdf.name}")
+        suffix = path.suffix.lower()
+        try:
+            if suffix == ".pdf":
+                pages  = _load_pdf(path)
+                chunks = _chunk(pages)
+                all_chunks.extend(chunks)
+                print(f"[RAG] Loaded {len(chunks)} chunks from {path.name}")
+            elif suffix in (".md", ".html", ".htm", ".txt"):
+                blocks = _load_markdown(path)
+                chunks = _chunk(blocks)
+                all_chunks.extend(chunks)
+                print(f"[RAG] Loaded {len(chunks)} chunks from {path.name}")
+        except Exception as e:
+            print(f"[RAG] Warning: could not load {path.name}: {e}")
 
     if not all_chunks:
-        raise FileNotFoundError("[RAG] No PDF content found. Check the data/ folder.")
+        raise FileNotFoundError("[RAG] No content loaded. Check the data/ folder.")
 
     tokenised = [c.lower().split() for c in all_chunks]
     index     = BM25Okapi(tokenised)
@@ -76,7 +134,6 @@ def retrieve_context(query: str, top_k: int = TOP_K) -> str:
     tokens = query.lower().split()
     scores = _bm25_index.get_scores(tokens)
 
-    # Pair scores with chunks and sort descending
     ranked   = sorted(enumerate(scores), key=lambda x: x[1], reverse=True)
     top_idxs = [idx for idx, score in ranked[:top_k] if score > 0]
 

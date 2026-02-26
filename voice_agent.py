@@ -26,7 +26,7 @@ from sarvamai.play import play
 from guardrails import check_input, check_output
 from rag import retrieve_context
 
-# ─── Config ───────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────── Config ────────────────────────────────
 
 load_dotenv()
 API_KEY = os.getenv("SARVAM_API_KEY", "")
@@ -43,12 +43,12 @@ SILENCE_DURATION  = 2.0    # seconds of silence → end of utterance
 MAX_RECORD_SECS   = 45     # hard cap (longer for detailed student feedback)
 
 # TTS
-TTS_LANGUAGE = "en-IN"     # hi-IN | en-IN | ta-IN | te-IN | kn-IN | ml-IN | ...
-TTS_SPEAKER  = "shubh"     # anushka | priya | shubh | rahul | kavya | ...
+TTS_LANGUAGE = "ml-IN"     # hi-IN | en-IN | ta-IN | te-IN | kn-IN | ml-IN | ...
+TTS_SPEAKER  = "amit"      # ml-IN voices: neel | pavithra | anushka | ...
 
 # Calling agent — opening line spoken on every call
 OPENING_LINE = (
-    "Namah Shivaya. I am contacting you from the Amrita PhD section. "
+    "namah shivaya. I am contacting you from the Amrita PhD section. "
     "Are you experiencing any discomfort or issues in your PhD course?"
 )
 
@@ -228,8 +228,11 @@ def main():
     log("TTS", f'Agent (opening): "{OPENING_LINE}"')
     speak(OPENING_LINE)
 
-    # Seed history so LLM knows it already greeted the student
+    # Seed history so LLM knows it already greeted the student.
+    # Sarvam requires first non-system message to be from "user",
+    # so we add a dummy user turn before the assistant's opening line.
     history: list[dict] = [
+        {"role": "user",      "content": "[Call connected]"},
         {"role": "assistant", "content": OPENING_LINE},
     ]
 
