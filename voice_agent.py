@@ -1,10 +1,14 @@
 """
-Sarvam AI Real-Time Voice Agent  (SDK edition)
-================================================
-Pipeline: Microphone → Saaras v3 (STT) → sarvam-m1 (LLM) → Bulbul v3 (TTS) → Speaker
+Amrita PhD Calling Agent  —  Sarvam AI (SDK edition)
+=====================================================
+Purpose : Outbound voice agent for Amrita University PhD section.
+          Greets students, collects feedback on course experience,
+          and answers queries using the PhD policy / research PDFs.
+
+Pipeline : Mic → Saaras v3 (STT) → sarvam-m1 (LLM + RAG) → Bulbul v3 (TTS) → Speaker
 
 Requirements:
-    pip install sarvamai pyaudio python-dotenv
+    pip install sarvamai pyaudio python-dotenv pypdf rank-bm25
 
 Usage:
     python voice_agent.py
@@ -34,22 +38,42 @@ SAMPLE_RATE      = 16_000
 CHANNELS         = 1
 FORMAT           = pyaudio.paInt16
 CHUNK_SIZE       = 1024
-SILENCE_THRESHOLD = 600    # RMS; raise if mic picks up background noise
-SILENCE_DURATION = 1.8     # seconds of silence → end of utterance
-MAX_RECORD_SECS  = 30      # hard cap
+SILENCE_THRESHOLD = 500    # RMS — lower = more sensitive; raise for noisy environments
+SILENCE_DURATION  = 2.0    # seconds of silence → end of utterance
+MAX_RECORD_SECS   = 45     # hard cap (longer for detailed student feedback)
 
 # TTS
 TTS_LANGUAGE = "en-IN"     # hi-IN | en-IN | ta-IN | te-IN | kn-IN | ml-IN | ...
 TTS_SPEAKER  = "shubh"     # anushka | priya | shubh | rahul | kavya | ...
 
-# LLM
-SYSTEM_PROMPT = (
-    "You are a helpful, friendly voice assistant powered by Sarvam AI. "
-    "Keep answers short and conversational — 1-3 sentences max. "
-    "Reply in the same language the user speaks."
+# Calling agent — opening line spoken on every call
+OPENING_LINE = (
+    "Namah Shivaya. I am contacting you from the Amrita PhD section. "
+    "Are you experiencing any discomfort or issues in your PhD course?"
 )
 
-EXIT_KEYWORDS = {"quit", "exit", "bye", "goodbye", "stop"}
+# LLM — system prompt tuned for Amrita PhD support agent
+SYSTEM_PROMPT = """\
+You are a professional and empathetic outbound calling agent for the Amrita University PhD section.
+Your role is to:
+  1. Check on students' well-being and course experience.
+  2. Answer questions about PhD policies, deadlines, and research areas using the provided knowledge.
+  3. Collect feedback on any difficulties the student is facing and acknowledge them warmly.
+  4. If the student has a specific grievance, note it clearly and assure them it will be escalated.
+
+Strict rules:
+  - Keep every response to 1-3 SHORT, spoken sentences — this is a phone call, not an email.
+  - Never read out bullet points or lists aloud; convert them into natural speech.
+  - Speak in the same language the student uses (English or any Indian language).
+  - Always maintain a respectful, caring, and professional tone.
+  - Do NOT make up policy details — only use the knowledge provided to you.
+  - If you don't know something, say: "I'll note that and have the PhD office follow up with you."
+"""
+
+EXIT_KEYWORDS = {
+    "quit", "exit", "bye", "goodbye", "stop", "disconnect",
+    "end call", "hang up", "that's all", "nothing else",
+}
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -159,9 +183,9 @@ def chat(user_text: str, history: list[dict], context: str = "") -> str:
     try:
         response = client.chat.completions(
             messages=messages,
-            temperature=0.7,
-            top_p=1,
-            max_tokens=300,
+            temperature=0.4,   # lower = more consistent, professional tone
+            top_p=0.9,
+            max_tokens=150,    # keep responses short — this is a phone call
         )
         # SDK returns object with choices list
         if hasattr(response, "choices"):
@@ -191,15 +215,23 @@ def speak(text: str) -> None:
 # ─── Main Loop ────────────────────────────────────────────────────────────────
 
 def main():
-    log("SYS", "=" * 55)
-    log("SYS", "  Sarvam AI Voice Agent")
+    log("SYS", "=" * 60)
+    log("SYS", "  Amrita PhD Calling Agent  —  Sarvam AI")
     log("SYS", "  STT: Saaras v3  |  LLM: sarvam-m1  |  TTS: Bulbul v3")
     log("SYS", f"  Language: {TTS_LANGUAGE}  |  Speaker: {TTS_SPEAKER}")
-    log("SYS", "  Say 'quit' or 'exit' to stop. Press Ctrl+C to force-quit.")
-    log("SYS", "=" * 55)
+    log("SYS", "  Say 'bye' / 'goodbye' / 'end call' to finish.")
+    log("SYS", "=" * 60)
 
     pa = pyaudio.PyAudio()
-    history: list[dict] = []
+
+    # ── Opening greeting (agent speaks first) ────────────────────
+    log("TTS", f'Agent (opening): "{OPENING_LINE}"')
+    speak(OPENING_LINE)
+
+    # Seed history so LLM knows it already greeted the student
+    history: list[dict] = [
+        {"role": "assistant", "content": OPENING_LINE},
+    ]
 
     try:
         while True:
@@ -217,7 +249,11 @@ def main():
 
             # Exit check
             if any(kw in user_text.lower() for kw in EXIT_KEYWORDS):
-                farewell = "Goodbye! Have a great day!"
+                farewell = (
+                    "Thank you for your time. Namah Shivaya. "
+                    "The Amrita PhD office will reach out if there is any follow-up. "
+                    "Have a wonderful day!"
+                )
                 log("LLM", f'Agent: "{farewell}"')
                 speak(farewell)
                 break
