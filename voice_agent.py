@@ -19,6 +19,8 @@ import pyaudio
 from dotenv import load_dotenv
 from sarvamai import SarvamAI
 from sarvamai.play import play
+from guardrails import check_input, check_output
+from rag import retrieve_context
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 
@@ -135,7 +137,8 @@ def transcribe(wav_buf: io.BytesIO) -> str:
             mode="transcribe",        # transcribe | translate | verbatim | translit | codemix
         )
         # SDK returns an object; grab the transcript string
-        text = getattr(response, "transcript", None) or str(response)
+        transcript = getattr(response, "transcript", None)
+        text = transcript if transcript is not None else str(response)
         return text.strip()
     except Exception as e:
         log("ERR", f"STT failed: {e}")
@@ -144,9 +147,12 @@ def transcribe(wav_buf: io.BytesIO) -> str:
 
 # ─── 3. LLM — sarvam-m1 ──────────────────────────────────────────────────────
 
-def chat(user_text: str, history: list[dict]) -> str:
+def chat(user_text: str, history: list[dict], context: str = "") -> str:
     log("LLM", "Thinking…")
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    system = SYSTEM_PROMPT
+    if context:
+        system += f"\n\nRelevant knowledge:\n{context}"
+    messages = [{"role": "system", "content": system}]
     messages.extend(history)
     messages.append({"role": "user", "content": user_text})
 
@@ -216,8 +222,28 @@ def main():
                 speak(farewell)
                 break
 
+            # Guardrail — input check
+            is_safe, reason = check_input(user_text)
+            if not is_safe:
+                refusal = "I'm sorry, I can't help with that topic."
+                log("ERR", f"Input blocked: {reason}")
+                speak(refusal)
+                continue
+
+            # RAG — retrieve relevant context from PDFs
+            context = retrieve_context(user_text)
+            if context:
+                log("LLM", f"RAG: injecting {len(context.split())} words of context")
+
             # Step 3 — LLM
-            reply = chat(user_text, history)
+            reply = chat(user_text, history, context=context)
+
+            # Guardrail — output check
+            is_safe, reply = check_output(reply)
+            if not is_safe:
+                reply = "I'm sorry, I can't share that response."
+                log("ERR", "Output blocked by guardrail.")
+
             log("LLM", f'Agent: "{reply}"')
 
             # Update conversation history (keep last 10 turns = 20 messages)
