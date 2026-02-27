@@ -19,8 +19,8 @@ from rank_bm25 import BM25Okapi
 
 DATA_DIR   = Path(__file__).parent / "data"
 PDF_FILES  = [
-    DATA_DIR / "phd-policy.pdf",
-    DATA_DIR / "phd-research-areas-2025.pdf",
+    DATA_DIR / "policy.pdf",
+    DATA_DIR / "research.pdf",
 ]
 CHUNK_SIZE = 300   # words per chunk
 TOP_K      = 3     # number of chunks to return
